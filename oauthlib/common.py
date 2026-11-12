@@ -477,6 +477,13 @@ class Request:
         self.oauth_params = []
         self.validator_log = {}
 
+        # Set when the URI query string is not valid x-www-form-urlencoded
+        # (invalid characters or bad percent-encoding). The query parameters
+        # are then left unparsed and it is up to the receiving endpoint to
+        # reject the request with a controlled invalid_request error instead
+        # of surfacing the decode failure as an internal error.
+        self.malformed_query_string = False
+
         self._params = {
             "access_token": None,
             "client": None,
@@ -513,7 +520,10 @@ class Request:
             "login_hint": None,
             "acr_values": None
         }
-        self._params.update(dict(urldecode(self.uri_query)))
+        try:
+            self._params.update(dict(urldecode(self.uri_query)))
+        except ValueError:
+            self.malformed_query_string = True
         self._params.update(dict(self.decoded_body or []))
 
     def __getattr__(self, name):

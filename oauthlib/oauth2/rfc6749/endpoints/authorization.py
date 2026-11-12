@@ -9,6 +9,7 @@ import logging
 
 from oauthlib.common import Request
 from oauthlib.oauth2.rfc6749 import utils
+from oauthlib.oauth2.rfc6749.errors import InvalidRequestFatalError
 
 from .base import BaseEndpoint, catch_errors_and_unavailability
 
@@ -103,12 +104,32 @@ class AuthorizationEndpoint(BaseEndpoint):
                 request.response_type = registered
                 return
 
+    def _raise_on_malformed_authorization_query(self, request):
+        """Raise if the URI query string could not be parsed.
+
+        A query string that is not valid x-www-form-urlencoded (invalid
+        characters or bad percent-encoding) is rejected with a fatal
+        invalid_request error: the client and its redirection URI cannot
+        be established from an unparseable query string, so the error
+        must not be redirected. This mirrors the existing handling of
+        query strings with dangling parameters.
+
+        Named distinctly from BaseEndpoint._raise_on_malformed_query_string
+        because the pre-configured servers mix several endpoints together
+        and method resolution would otherwise pick this fatal variant for
+        the token and resource endpoints as well.
+        """
+        if request.malformed_query_string:
+            raise InvalidRequestFatalError(
+                description='Unable to parse query string.', request=request)
+
     @catch_errors_and_unavailability
     def create_authorization_response(self, uri, http_method='GET', body=None,
                                       headers=None, scopes=None, credentials=None):
         """Extract response_type and route to the designated handler."""
         request = Request(
             uri, http_method=http_method, body=body, headers=headers)
+        self._raise_on_malformed_authorization_query(request)
         request.scopes = scopes
         # TODO: decide whether this should be a required argument
         request.user = None     # TODO: explain this in docs
@@ -128,6 +149,7 @@ class AuthorizationEndpoint(BaseEndpoint):
         """Extract response_type and route to the designated handler."""
         request = Request(
             uri, http_method=http_method, body=body, headers=headers)
+        self._raise_on_malformed_authorization_query(request)
 
         request.scopes = utils.scope_to_list(request.scope)
 

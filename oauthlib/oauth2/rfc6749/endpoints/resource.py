@@ -63,6 +63,7 @@ class ResourceEndpoint(BaseEndpoint):
                        scopes=None):
         """Validate client, code etc, return body + headers"""
         request = Request(uri, http_method, body, headers)
+        self._raise_on_malformed_query_string(request)
         request.token_type = self.find_token_type(request)
         request.scopes = scopes
         token_type_handler = self.tokens.get(request.token_type,

@@ -558,3 +558,152 @@ class ErrorResponseTest(TestCase):
                 self.fail('This should have failed with InvalidRequestError')
             except errors.InvalidRequestError as ire:
                 self.assertIn('URL query parameters are not allowed', ire.description)
+
+
+class MalformedInputTest(TestCase):
+    """Behavior baseline for malformed request parameters.
+
+    Pins the error contract for malformed input at the three gateway
+    entries (authorization endpoint, token endpoint, protected resource
+    validation): equally malformed inputs must converge on controlled
+    invalid_request responses instead of internal errors, regardless of
+    whether they arrive in the query string or the request body.
+
+    Malformation forms covered: bad percent-encoding, dangling
+    parameters, unencoded special characters and overlong parameters.
+    """
+
+    def set_client(self, request):
+        request.client = mock.MagicMock()
+        request.client.client_id = 'mocked'
+        return True
+
+    def setUp(self):
+        self.validator = mock.MagicMock(spec=RequestValidator)
+        self.validator.get_default_redirect_uri.return_value = 'https://i.b/cb'
+        self.validator.get_code_challenge.return_value = None
+        self.web = WebApplicationServer(self.validator)
+        self.mobile = MobileApplicationServer(self.validator)
+        self.legacy = LegacyApplicationServer(self.validator)
+        self.backend = BackendApplicationServer(self.validator)
+
+    # Query strings that are not valid x-www-form-urlencoded.
+    malformed_queries = [
+        '%ZZ',        # bad percent-encoding
+        'foo bar',    # unencoded special characters
+    ]
+
+    def assert_fatal_invalid_request(self, func, *args, **kwargs):
+        with self.assertRaises(errors.InvalidRequestFatalError) as cm:
+            func(*args, **kwargs)
+        self.assertEqual('invalid_request', cm.exception.error)
+        self.assertIn('Unable to parse query string', cm.exception.description)
+
+    def assert_invalid_request(self, func, *args, **kwargs):
+        with self.assertRaises(errors.InvalidRequestError) as cm:
+            func(*args, **kwargs)
+        self.assertEqual('invalid_request', cm.exception.error)
+        self.assertIn('Unable to parse query string', cm.exception.description)
+
+    def test_authorization_endpoint_malformed_query(self):
+        # Bad encoding and unencoded special characters in the query string
+        # are rejected with a fatal invalid_request, never an internal error.
+        for bad in self.malformed_queries:
+            uri = 'https://i.b/auth?client_id=%s&response_type={0}' % bad
+            for server, response_type in ((self.web, 'code'), (self.mobile, 'token')):
+                self.assert_fatal_invalid_request(
+                        server.validate_authorization_request, uri.format(response_type))
+                self.assert_fatal_invalid_request(
+                        server.create_authorization_response,
+                        uri.format(response_type), scopes=['foo'])
+
+    def test_authorization_endpoint_dangling_query_param(self):
+        # Existing rejection semantics for dangling parameters are unchanged.
+        uri = 'https://i.b/auth?client_id&response_type={0}'
+        for server, response_type in ((self.web, 'code'), (self.mobile, 'token')):
+            self.assert_fatal_invalid_request(
+                    server.validate_authorization_request, uri.format(response_type))
+            self.assert_fatal_invalid_request(
+                    server.create_authorization_response,
+                    uri.format(response_type), scopes=['foo'])
+
+    def test_authorization_endpoint_overlong_param(self):
+        # Overlong parameters are not malformed: they flow through normal
+        # validation without any internal error.
+        uri = 'https://i.b/auth?client_id=%s&response_type={0}' % ('a' * 100000)
+        for server, response_type in ((self.web, 'code'), (self.mobile, 'token')):
+            self.assertTrue(server.validate_authorization_request(
+                uri.format(response_type)))
+
+    def test_token_endpoint_malformed_query(self):
+        for bad in self.malformed_queries:
+            uri = 'https://i.b/token?client_id=%s' % bad
+            for server in (self.web, self.legacy, self.backend):
+                self.assert_invalid_request(
+                        server.create_token_response, uri,
+                        body='grant_type=client_credentials')
+
+    def test_token_endpoint_malformed_query_not_a_server_error(self):
+        # With catch_errors enabled a malformed query string must still
+        # surface as invalid_request, never as a 500 server_error.
+        self.web.catch_errors = True
+        for bad in self.malformed_queries:
+            self.assert_invalid_request(
+                    self.web.create_token_response,
+                    'https://i.b/token?client_id=%s' % bad,
+                    body='grant_type=client_credentials')
+
+    def test_token_endpoint_malformed_body_form_recognition(self):
+        # Form recognition contract: a body that is not valid
+        # x-www-form-urlencoded is treated as raw body data, so the request
+        # fails later with a controlled 400, never a 500.
+        malformed_bodies = [
+            'grant_type=%ZZ',     # bad percent-encoding
+            'grant_type=auth code',  # unencoded special characters
+            'grant_type',         # dangling parameter
+        ]
+        self.validator.authenticate_client.side_effect = self.set_client
+        for body in malformed_bodies:
+            for server in (self.web, self.legacy, self.backend):
+                _, body_json, status = server.create_token_response(
+                        'https://i.b/token', body=body)
+                self.assertEqual(400, status)
+                error = json.loads(body_json)['error']
+                self.assertNotIn(error, ('server_error',))
+
+    def test_token_endpoint_overlong_body_param(self):
+        # Overlong parameters are not malformed: they reach the validator
+        # intact and the response stays controlled (here invalid_scope).
+        self.validator.authenticate_client.side_effect = self.set_client
+        self.validator.validate_scopes.return_value = False
+        overlong_scope = 'a' * 100000
+        _, body_json, status = self.backend.create_token_response(
+                'https://i.b/token',
+                body='grant_type=client_credentials&scope=' + overlong_scope)
+        self.assertEqual(400, status)
+        self.assertEqual('invalid_scope', json.loads(body_json)['error'])
+        self.assertEqual([overlong_scope],
+                self.validator.validate_scopes.call_args[0][1])
+
+    def test_resource_endpoint_malformed_query(self):
+        for bad in self.malformed_queries:
+            uri = 'https://i.b/resource?access_token=%s' % bad
+            for server in (self.web, self.legacy, self.backend):
+                self.assert_invalid_request(server.verify_request, uri)
+
+    def test_resource_endpoint_malformed_query_not_a_server_error(self):
+        self.web.catch_errors = True
+        for bad in self.malformed_queries:
+            self.assert_invalid_request(
+                    self.web.verify_request,
+                    'https://i.b/resource?access_token=%s' % bad)
+
+    def test_resource_endpoint_dangling_and_overlong_query_param(self):
+        # Dangling and overlong query parameters are not rejected at parse
+        # time; they reach the token validator as before.
+        self.validator.validate_bearer_token.return_value = False
+        for uri in ('https://i.b/resource?access_token',
+                    'https://i.b/resource?access_token=' + 'a' * 100000):
+            valid, _request = self.web.verify_request(uri)
+            self.assertFalse(valid)
+            self.assertTrue(self.validator.validate_bearer_token.called)

@@ -79,6 +79,17 @@ class BaseEndpoint:
             raise InvalidRequestError(request=request,
                                       description=('Unsupported request method %s' % request.http_method.upper()))
 
+    def _raise_on_malformed_query_string(self, request):
+        """Raise if the URI query string could not be parsed.
+
+        A query string that is not valid x-www-form-urlencoded (invalid
+        characters or bad percent-encoding) is rejected with a controlled
+        invalid_request response instead of surfacing as an internal error.
+        """
+        if request.malformed_query_string:
+            raise InvalidRequestError(request=request,
+                                      description='Unable to parse query string.')
+
     def _raise_on_bad_post_request(self, request):
         """Raise if invalid POST request received
         """

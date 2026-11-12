@@ -317,6 +317,48 @@ class RequestTest(TestCase):
             # set flag back for other tests
             oauthlib.set_debug(True)
 
+    def test_malformed_query_string_flag_defaults_false(self):
+        r = Request(URI)
+        self.assertFalse(r.malformed_query_string)
+
+    def test_malformed_query_string_bad_hex_encoding(self):
+        # Bad percent-encoding must not raise out of the constructor; the
+        # query parameters are dropped and the failure is flagged so the
+        # endpoints can reject the request with a controlled error.
+        r = Request('http://a.b/path?client_id=%ZZ&response_type=code')
+        self.assertTrue(r.malformed_query_string)
+        self.assertIsNone(r.client_id)
+        self.assertIsNone(r.response_type)
+
+    def test_malformed_query_string_invalid_characters(self):
+        # Raw (unencoded) special characters such as spaces are not valid
+        # in an x-www-form-urlencoded query string.
+        r = Request('http://a.b/path?client_id=foo bar')
+        self.assertTrue(r.malformed_query_string)
+        self.assertIsNone(r.client_id)
+
+    def test_dangling_query_parameter_not_malformed(self):
+        # A parameter without '=' is dangling but still decodable; rejecting
+        # it stays with the strict uri_query_params parsing, unchanged.
+        r = Request('http://a.b/path?client_id&response_type=code')
+        self.assertFalse(r.malformed_query_string)
+        self.assertEqual(r.client_id, '')
+        self.assertRaises(ValueError, lambda: r.uri_query_params)
+
+    def test_overlong_query_parameter_not_malformed(self):
+        r = Request('http://a.b/path?client_id=' + 'a' * 100000)
+        self.assertFalse(r.malformed_query_string)
+        self.assertEqual(r.client_id, 'a' * 100000)
+
+    def test_malformed_body_still_treated_as_raw(self):
+        # Form recognition contract: a body that is not valid
+        # x-www-form-urlencoded is passed through as raw body data,
+        # exactly as before, and does not flag the query string.
+        r = Request(URI, http_method='POST', body='grant_type=%ZZ')
+        self.assertFalse(r.malformed_query_string)
+        self.assertIsNone(r.decoded_body)
+        self.assertIsNone(r.grant_type)
+
 
 class CaseInsensitiveDictTest(TestCase):
 

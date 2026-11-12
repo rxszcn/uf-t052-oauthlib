@@ -5,6 +5,7 @@ OAuth 2.0
    :maxdepth: 2
 
    security
+   malformed_input_matrix
    clients/client
    server
    endpoints/endpoints
